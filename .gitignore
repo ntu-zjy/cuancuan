@@ -1,0 +1,11 @@
+node_modules
+.next
+out
+.playwright-cli
+output
+.DS_Store
+*.log
+.env
+.env.local
+.env.*.local
+!.env.example
