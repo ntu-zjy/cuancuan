@@ -1,5 +1,5 @@
-import CuancuanApp from "@/components/CuancuanApp";
+import ChannelLanding from "@/components/ChannelLanding";
 
 export default function Home() {
-  return <CuancuanApp />;
+  return <ChannelLanding />;
 }

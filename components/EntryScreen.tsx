@@ -1,75 +1,73 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import type { Profile } from "@/lib/types";
+import Link from "next/link";
+import type { Channel, Profile } from "@/lib/types";
+import { SendIcon } from "./AppIcons";
+import BrandMark from "./BrandMark";
 
-type Props = { onEnter: (profile: Profile) => void };
+type Props = { channel: Channel; onEnter: (profile: Profile) => void };
 
-export default function EntryScreen({ onEnter }: Props) {
+export default function EntryScreen({ channel, onEnter }: Props) {
   const [mode, setMode] = useState<"register" | "login">("register");
   const [email, setEmail] = useState("");
   const [nickname, setNickname] = useState("");
   const [inviteCode, setInviteCode] = useState("CUANCUAN2026");
   const [verifyCode, setVerifyCode] = useState("888888");
+  const [registerStep, setRegisterStep] = useState<1 | 2>(1);
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
-  function submit(event: FormEvent) {
+  async function submit(event: FormEvent) {
     event.preventDefault();
     setError("");
     if (!/^\S+@\S+\.\S+$/.test(email)) return setError("请填写一个有效邮箱。 ");
-    if (verifyCode !== "888888") return setError("验证码不正确，Demo 验证码是 888888。 ");
-    if (mode === "register" && inviteCode !== "CUANCUAN2026") return setError("内测码无效或已失效。 ");
+    if (!/^\d{6}$/.test(verifyCode)) return setError("请填写 6 位邮箱验证码。 ");
+    if (mode === "register" && registerStep === 1) {
+      setRegisterStep(2);
+      return;
+    }
     if (mode === "register" && nickname.trim().length < 2) return setError("昵称至少需要两个字。 ");
-    onEnter({
-      nickname: nickname.trim() || email.split("@")[0],
-      email,
-      city: "",
-      identity: "",
-      skills: "",
-      offer: "",
-      bio: "",
-    });
+    setSubmitting(true);
+    try {
+      const response = await fetch("/api/auth/entry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, email, nickname, inviteCode, verifyCode, channel }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "暂时无法进入攒攒。 ");
+      onEnter(data.profile as Profile);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "暂时无法进入攒攒。 ");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
     <main className="entry-shell">
       <header className="entry-nav" aria-label="品牌导航">
-        <a className="brand" href="#top" aria-label="攒攒首页">
-          <span className="brand-mark">攒</span>
+        <Link className="brand" href="/" aria-label="返回攒攒首页">
+          <span className="brand-mark"><BrandMark priority /></span>
           <span>攒攒</span>
-        </a>
-        <span className="entry-edition">INVITE DEMO · 2026</span>
+        </Link>
       </header>
 
       <section className="entry-hero" id="top">
-        <div className="entry-copy">
-          <p className="eyebrow reveal-one">任何关系需求，都从一句真话开始</p>
-          <h1 className="reveal-two">
-            你想找的人，
-            <span className="marker">先说给攒攒听。</span>
-          </h1>
-          <p className="entry-lead reveal-three">
-            合作、招聘、加入团队，或认真认识一个人。你不必先选频道，也不用填一份很长的问卷。
-          </p>
-
-          <div className="scene-lines reveal-three" aria-label="支持的三种典型场景">
-            <div><span>01 / 合作</span><p>找一位能把想法一起做出来的人</p></div>
-            <div><span>02 / 招聘</span><p>遇见真正理解现阶段的关键伙伴</p></div>
-            <div><span>03 / 关系</span><p>从真实生活里，认真认识彼此</p></div>
-          </div>
-        </div>
-
         <div className="entry-panel-wrap reveal-panel">
-          <div className="paper-note" aria-hidden="true">
-            <span>攒攒正在听</span>
-            <p>“我不急着找一个标准答案，更想先遇见方向和节奏都对的人。”</p>
-          </div>
           <div className="entry-panel">
+            <div className="entry-auth-intro">
+              <span className="entry-auth-mark"><BrandMark priority /></span>
+              <h1>登录或加入</h1>
+              <p>和攒攒开始一段对话</p>
+            </div>
+
             <div className="auth-tabs" role="tablist" aria-label="账号方式">
               <button
                 type="button"
                 className={mode === "register" ? "active" : ""}
-                onClick={() => { setMode("register"); setError(""); }}
+                onClick={() => { setMode("register"); setRegisterStep(1); setError(""); }}
                 role="tab"
                 aria-selected={mode === "register"}
               >
@@ -78,7 +76,7 @@ export default function EntryScreen({ onEnter }: Props) {
               <button
                 type="button"
                 className={mode === "login" ? "active" : ""}
-                onClick={() => { setMode("login"); setError(""); }}
+                onClick={() => { setMode("login"); setRegisterStep(1); setError(""); }}
                 role="tab"
                 aria-selected={mode === "login"}
               >
@@ -87,65 +85,88 @@ export default function EntryScreen({ onEnter }: Props) {
             </div>
 
             <div className="panel-heading">
-              <p className="eyebrow">{mode === "register" ? "START A CONVERSATION" : "WELCOME BACK"}</p>
-              <h2>{mode === "register" ? "先从认识你开始。" : "继续上次的对话。"}</h2>
+              <h2>
+                {mode === "login"
+                  ? "使用邮箱登录"
+                  : registerStep === 1
+                    ? "使用邮箱加入"
+                    : "完成账号资料"}
+              </h2>
+              {mode === "register" && <p className="auth-progress">第 {registerStep} 步，共 2 步</p>}
             </div>
 
             <form onSubmit={submit} noValidate>
-              <label>
-                <span>邮箱</span>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                  placeholder="you@example.com"
-                  autoComplete="email"
-                />
-              </label>
-              {mode === "register" && (
+              {(mode === "login" || registerStep === 1) && (
                 <>
                   <label>
-                    <span>怎么称呼你</span>
+                    <span>邮箱</span>
+                    <input
+                      type="email"
+                      value={email}
+                      onChange={(event) => setEmail(event.target.value)}
+                      placeholder="you@example.com"
+                      autoComplete="email"
+                    />
+                  </label>
+                  <label>
+                    <span>邮箱验证码</span>
+                    <div className="input-action-row">
+                      <input
+                        inputMode="numeric"
+                        value={verifyCode}
+                        onChange={(event) => setVerifyCode(event.target.value)}
+                        maxLength={6}
+                      />
+                      <button type="button" onClick={() => setVerifyCode("888888")}>获取验证码</button>
+                    </div>
+                  </label>
+                </>
+              )}
+              {mode === "register" && registerStep === 2 && (
+                <>
+                  <label>
+                    <span>昵称</span>
                     <input
                       value={nickname}
                       onChange={(event) => setNickname(event.target.value)}
-                      placeholder="一个自然的昵称"
+                      placeholder="大家怎么称呼你"
                       autoComplete="nickname"
+                      autoFocus
                     />
                   </label>
                   <label>
                     <span>内测码</span>
                     <input value={inviteCode} onChange={(event) => setInviteCode(event.target.value)} />
                   </label>
+                  <button
+                    className="auth-back"
+                    type="button"
+                    onClick={() => { setRegisterStep(1); setError(""); }}
+                  >
+                    返回修改邮箱
+                  </button>
                 </>
               )}
-              <label>
-                <span>邮箱验证码</span>
-                <div className="input-action-row">
-                  <input
-                    inputMode="numeric"
-                    value={verifyCode}
-                    onChange={(event) => setVerifyCode(event.target.value)}
-                    maxLength={6}
-                  />
-                  <button type="button" onClick={() => setVerifyCode("888888")}>获取验证码</button>
-                </div>
-              </label>
               {error && <p className="form-error" role="alert">{error}</p>}
-              <button className="highlight-button auth-submit" type="submit">
-                {mode === "register" ? "进入攒攒" : "继续对话"}
-                <span aria-hidden="true">→</span>
+              <button className="highlight-button auth-submit" type="submit" disabled={submitting}>
+                {submitting
+                  ? "正在验证"
+                  : mode === "login"
+                    ? "继续对话"
+                    : registerStep === 1
+                      ? "继续"
+                      : "进入攒攒"}
+                <SendIcon />
               </button>
             </form>
-            <p className="demo-hint">Demo 已预填体验内测码与验证码；模型密钥只保留在服务端。</p>
+            <p className="demo-hint">
+              {mode === "register" && registerStep === 2
+                ? "内测期间仅用于控制体验名额。"
+                : "体验环境已预填验证码。"}
+            </p>
           </div>
         </div>
       </section>
-
-      <footer className="entry-footer">
-        <span>先聊，再匹配。</span>
-        <span>不替你做决定，也不展示原始对话。</span>
-      </footer>
     </main>
   );
 }
