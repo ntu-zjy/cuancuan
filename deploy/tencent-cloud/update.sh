@@ -53,6 +53,7 @@ if [[ -d "${RELEASE_DIR}/deploy/tencent-cloud" ]]; then
   install -m 0755 "${RELEASE_DIR}/deploy/tencent-cloud/update.sh" /usr/local/sbin/cuancuan-update
   install -m 0755 "${RELEASE_DIR}/deploy/tencent-cloud/backup.sh" /usr/local/sbin/cuancuan-backup
   install -m 0755 "${RELEASE_DIR}/deploy/tencent-cloud/restore.sh" /usr/local/sbin/cuancuan-restore
+  install -m 0755 "${RELEASE_DIR}/deploy/tencent-cloud/reset-admin.sh" /usr/local/sbin/cuancuan-reset-admin
 fi
 systemctl restart "${APP_NAME}.service"
 

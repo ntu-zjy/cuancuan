@@ -136,6 +136,7 @@ if [[ ! -f "${ENV_FILE}" ]]; then
     printf 'APP_ENCRYPTION_KEY="%s"\n' "$(escape_env_value "${APP_ENCRYPTION_KEY_VALUE}")"
     printf 'DATABASE_PATH="%s/cuancuan.db"\n' "${DATA_DIR}"
     printf 'DEMO_VERIFY_CODE="%s"\n' "${DEMO_VERIFY_CODE_VALUE}"
+    printf 'SITE_ORIGIN="https://%s"\n' "$(escape_env_value "${SITE_ADDRESS}")"
   } > "${ENV_FILE}"
   chown root:"${APP_GROUP}" "${ENV_FILE}"
   chmod 0640 "${ENV_FILE}"
@@ -199,7 +200,11 @@ echo "[6/8] 配置 Caddy HTTPS 反向代理"
 cat > /etc/caddy/Caddyfile <<EOF
 ${SITE_ADDRESS} {
   encode zstd gzip
-  reverse_proxy 127.0.0.1:3000
+  reverse_proxy 127.0.0.1:3000 {
+    header_up Host {host}
+    header_up X-Forwarded-Host {host}
+    header_up X-Forwarded-Proto {scheme}
+  }
 
   header {
     X-Content-Type-Options nosniff
@@ -218,6 +223,7 @@ fi
 install -m 0755 "${DEPLOY_SOURCE_DIR}/update.sh" /usr/local/sbin/cuancuan-update
 install -m 0755 "${DEPLOY_SOURCE_DIR}/backup.sh" /usr/local/sbin/cuancuan-backup
 install -m 0755 "${DEPLOY_SOURCE_DIR}/restore.sh" /usr/local/sbin/cuancuan-restore
+install -m 0755 "${DEPLOY_SOURCE_DIR}/reset-admin.sh" /usr/local/sbin/cuancuan-reset-admin
 
 cat > "/etc/systemd/system/${APP_NAME}-backup.service" <<EOF
 [Unit]
