@@ -130,6 +130,14 @@ try {
 database.close();
 NODE
 
+# The reset tool runs as root, while the web process uses APP_USER. Keep the
+# SQLite database and any WAL sidecar files readable and writable by the app.
+chown "${APP_USER}:${APP_GROUP}" "${DATABASE_PATH}" 2>/dev/null || true
+for sqlite_sidecar in "${DATABASE_PATH}-wal" "${DATABASE_PATH}-shm"; do
+  [[ -e "${sqlite_sidecar}" ]] && chown "${APP_USER}:${APP_GROUP}" "${sqlite_sidecar}"
+done
+chmod 0640 "${DATABASE_PATH}" 2>/dev/null || true
+
 systemctl restart "${APP_NAME}.service"
 
 echo "管理员已重置：${ADMIN_EMAIL_VALUE}"

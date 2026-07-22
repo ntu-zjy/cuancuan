@@ -24,8 +24,14 @@ export default function AdminLogin({ localHint }: {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "登录失败");
+      const payload = await response.text();
+      let data: { error?: string } | null = null;
+      try {
+        data = payload ? JSON.parse(payload) as { error?: string } : null;
+      } catch {
+        // A reverse proxy may return an empty or non-JSON response during a restart.
+      }
+      if (!response.ok) throw new Error(data?.error || "登录服务暂时不可用，请稍后再试。");
       router.replace("/admin");
       router.refresh();
     } catch (reason) {
