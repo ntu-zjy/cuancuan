@@ -63,6 +63,13 @@ prompt_secret() {
 }
 
 echo "[1/8] 安装 Node.js、Caddy、Git 和 SQLite 工具"
+if [[ -f /etc/apt/sources.list.d/caddy-stable.list ]] \
+  && command -v curl >/dev/null 2>&1 \
+  && command -v gpg >/dev/null 2>&1; then
+  curl -fsSL https://dl.cloudsmith.io/public/caddy/stable/gpg.key \
+    | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+fi
 apt-get update
 apt-get install -y ca-certificates curl git gnupg sqlite3 rsync
 
