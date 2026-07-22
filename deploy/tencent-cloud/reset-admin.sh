@@ -77,6 +77,29 @@ const { randomBytes, scryptSync, randomUUID } = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
 
 const database = new DatabaseSync(process.env.DATABASE_PATH);
+database.exec(`
+  PRAGMA foreign_keys = ON;
+  PRAGMA journal_mode = WAL;
+  PRAGMA busy_timeout = 5000;
+
+  CREATE TABLE IF NOT EXISTS admin_users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    password_salt TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'admin',
+    created_at TEXT NOT NULL,
+    last_login_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS admin_sessions (
+    id TEXT PRIMARY KEY,
+    admin_user_id TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+`);
 const email = process.env.ADMIN_EMAIL_VALUE.trim().toLowerCase();
 const password = process.env.ADMIN_PASSWORD_VALUE.trim();
 const salt = randomBytes(16).toString("hex");
