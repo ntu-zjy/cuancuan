@@ -116,6 +116,12 @@ npm run build
 
 曾经出现在聊天、截图或终端记录中的模型 Key 应先在平台侧作废并重新生成，再通过 HTTPS 管理员后台录入。`APP_ENCRYPTION_KEY` 必须独立备份，丢失或更换后数据库中既有模型密钥将无法解密。
 
+完整的无 Docker 安装、更新、备份、恢复和排查命令见 [`deploy/tencent-cloud/README.md`](deploy/tencent-cloud/README.md)。首次部署入口：
+
+```bash
+sudo bash deploy/tencent-cloud/install.sh
+```
+
 ## 当前数据边界
 
 账号核心资料、各关系空间画像、局、报名、生命周期、局内群聊、反馈、信任治理、内测码、管理员会话、模型平台配置和 Agent 运行日志已经进入 SQLite；对话和 Intent 按关系空间保存在当前浏览器 LocalStorage。活动签到表及对接结果只存在当前页面内存，刷新后清空。

@@ -1,0 +1,32 @@
+攒攒腾讯云原生部署包（无 Docker）
+================================
+
+一、腾讯云防火墙开放 TCP 22、80、443；不要开放 3000。
+
+二、把本压缩包上传到服务器后执行：
+
+  tar -xzf cuancuan-tencent-native-deploy.tar.gz
+  cd deploy/tencent-cloud
+  sudo SITE_ADDRESS=43-160-203-221.sslip.io bash install.sh
+
+安装时会询问：
+
+  1. 管理员邮箱
+  2. 至少 12 位管理员密码
+  3. 六位 Demo 验证码
+
+三、部署完成后访问：
+
+  https://43-160-203-221.sslip.io
+  https://43-160-203-221.sslip.io/admin
+
+四、在管理员后台配置新的阶跃星辰 Key。部署包不包含任何模型 Key。
+
+五、常用命令：
+
+  sudo journalctl -u cuancuan -f
+  sudo cuancuan-update
+  sudo cuancuan-backup
+  ls -lh /var/backups/cuancuan
+
+详细说明见 README.md。
