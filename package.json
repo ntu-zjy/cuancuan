@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "simulate:100": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/simulate-100-users.mjs",
+    "simulate:100:http": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/simulate-100-users-http.mjs"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.12",

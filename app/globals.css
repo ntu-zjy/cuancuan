@@ -2152,6 +2152,19 @@ h3 {
   height: 590px;
 }
 
+/* A full activity can contain 100 people.  In that mode names stay in the
+   ranked relationship list and appear on selection; drawing every label on
+   the map would turn the graph into unreadable noise. */
+.event-network.dense {
+  width: 1280px;
+  min-width: 980px;
+  height: 860px;
+}
+
+.event-network.dense .event-node-initial { font-size: 10px; }
+.event-network.dense .event-node-name { font-size: 11px; }
+.event-network.dense .event-node-role { font-size: 7px; }
+
 #event-arrow path { fill: var(--zz-ink); }
 
 .event-edge { cursor: pointer; outline: none; }

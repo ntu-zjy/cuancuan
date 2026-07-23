@@ -8,9 +8,12 @@ import BrandMark from "./BrandMark";
 
 type MatchFilter = "all" | "priority" | "mutual";
 type MatchProvider = "waiting" | "agent" | "local";
-
-const GRAPH_WIDTH = 920;
-const GRAPH_HEIGHT = 590;
+type EventMatchCoverage = {
+  participantCount: number;
+  connectedParticipantCount: number;
+  unconnectedGuestIds: string[];
+  maximumConnectionsForOneGuest: number;
+};
 
 function splitTags(value: string) {
   return value
@@ -67,7 +70,7 @@ function parseGuestRows(rows: unknown[][]): { guests: EventGuest[]; contactColum
     .filter((guest) => guest.name && (guest.needs.length > 0 || guest.offers.length > 0));
 
   if (guests.length < 2) throw new Error("至少需要两位填写了需求或资源的嘉宾才能匹配。");
-  if (guests.length > 40) throw new Error("当前 Demo 单次最多分析 40 位嘉宾，请先按场次拆分。");
+  if (guests.length > 120) throw new Error("单次最多分析 120 位嘉宾，请按活动场次拆分。");
 
   return {
     guests,
@@ -102,15 +105,23 @@ function NetworkGraph({
   onSelectGuest: (id: string) => void;
   onSelectMatch: (id: string) => void;
 }) {
+  const dense = guests.length > 32;
+  const graphWidth = dense ? 1280 : 920;
+  const graphHeight = dense ? 860 : 590;
+  const nodeRadius = dense ? 17 : 29;
+  const nodesPerRing = dense ? 20 : guests.length;
   const positions = useMemo(() => new Map(guests.map((guest, index) => {
-    const angle = (Math.PI * 2 * index) / guests.length - Math.PI / 2;
-    const radiusX = guests.length > 12 ? 352 : 330;
-    const radiusY = guests.length > 12 ? 235 : 220;
+    const ring = dense ? Math.floor(index / nodesPerRing) : 0;
+    const ringStart = ring * nodesPerRing;
+    const peopleOnRing = dense ? Math.min(nodesPerRing, guests.length - ringStart) : guests.length;
+    const angle = (Math.PI * 2 * (index - ringStart)) / peopleOnRing - Math.PI / 2;
+    const radiusX = dense ? 142 + ring * 93 : guests.length > 12 ? 352 : 330;
+    const radiusY = dense ? 98 + ring * 63 : guests.length > 12 ? 235 : 220;
     return [guest.id, {
-      x: GRAPH_WIDTH / 2 + Math.cos(angle) * radiusX,
-      y: GRAPH_HEIGHT / 2 + Math.sin(angle) * radiusY,
+      x: graphWidth / 2 + Math.cos(angle) * radiusX,
+      y: graphHeight / 2 + Math.sin(angle) * radiusY,
     }];
-  })), [guests]);
+  })), [dense, graphHeight, graphWidth, guests, nodesPerRing]);
 
   function pathFor(match: EventMatch, index: number) {
     const start = positions.get(match.requesterId);
@@ -128,7 +139,7 @@ function NetworkGraph({
   }
 
   return (
-    <svg className="event-network" viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`} role="img" aria-label="嘉宾需求与资源合作对接图">
+    <svg className={`event-network ${dense ? "dense" : ""}`} viewBox={`0 0 ${graphWidth} ${graphHeight}`} role="img" aria-label={dense ? "100 人活动关系图，可通过下方引荐顺序查看具体关系" : "嘉宾需求与资源合作对接图"}>
       <defs>
         <marker id="event-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M 0 0 L 10 5 L 0 10 z" />
@@ -167,6 +178,7 @@ function NetworkGraph({
           const position = positions.get(guest.id)!;
           const connected = matches.some((match) => match.requesterId === guest.id || match.providerId === guest.id);
           const selected = guest.id === selectedGuestId;
+          const showLabel = !dense || selected;
           return (
             <g
               key={guest.id}
@@ -180,11 +192,11 @@ function NetworkGraph({
                 if (event.key === "Enter" || event.key === " ") onSelectGuest(guest.id);
               }}
             >
-              <circle className="event-node-halo" r="39" />
-              <circle className="event-node-body" r="29" />
+              <circle className="event-node-halo" r={nodeRadius + 10} />
+              <circle className="event-node-body" r={nodeRadius} />
               <text className="event-node-initial" textAnchor="middle" dominantBaseline="central">{initials(displayName(guest))}</text>
-              <text className="event-node-name" y="48" textAnchor="middle">{displayName(guest)}</text>
-              <text className="event-node-role" y="65" textAnchor="middle">{guest.roles[0] || guest.position || "现场嘉宾"}</text>
+              {showLabel && <text className="event-node-name" y={nodeRadius + 19} textAnchor="middle">{displayName(guest)}</text>}
+              {showLabel && <text className="event-node-role" y={nodeRadius + 36} textAnchor="middle">{guest.roles[0] || guest.position || "现场嘉宾"}</text>}
               <title>{displayName(guest)}：需要 {guest.needs.join("、")}；可提供 {guest.offers.join("、")}</title>
             </g>
           );
@@ -207,6 +219,7 @@ export default function EventMatchPage() {
   const [error, setError] = useState("");
   const [provider, setProvider] = useState<MatchProvider>("waiting");
   const [providerName, setProviderName] = useState("");
+  const [coverage, setCoverage] = useState<EventMatchCoverage | null>(null);
   const [filter, setFilter] = useState<MatchFilter>("all");
   const [selectedGuestId, setSelectedGuestId] = useState("");
   const [selectedMatchId, setSelectedMatchId] = useState("");
@@ -245,6 +258,7 @@ export default function EventMatchPage() {
     setMatches([]);
     setProvider("waiting");
     setProviderName("");
+    setCoverage(null);
     setFilter("all");
     setSelectedGuestId("");
     setSelectedMatchId("");
@@ -303,6 +317,15 @@ export default function EventMatchPage() {
       setMatches(data.matches || []);
       setProvider(data.provider === "agent" ? "agent" : "local");
       setProviderName(typeof data.providerName === "string" ? data.providerName : "");
+      setCoverage(
+        data.coverage
+        && typeof data.coverage.participantCount === "number"
+        && typeof data.coverage.connectedParticipantCount === "number"
+        && Array.isArray(data.coverage.unconnectedGuestIds)
+        && typeof data.coverage.maximumConnectionsForOneGuest === "number"
+          ? data.coverage as EventMatchCoverage
+          : null,
+      );
       setFilter("all");
       setSelectedMatchId(data.matches?.[0]?.id || "");
       setSelectedGuestId("");
@@ -548,7 +571,7 @@ export default function EventMatchPage() {
           <div className="event-source-bar">
             <div><span>数据源</span><strong>{sourceName}</strong></div>
             <div><span>可参与匹配</span><strong>{guests.length} 位</strong></div>
-            <div><span>已排除联系方式</span><strong>{contactColumns} 列</strong></div>
+            <div><span>{coverage ? "已进入关系图" : "已排除联系方式"}</span><strong>{coverage ? `${coverage.connectedParticipantCount}/${coverage.participantCount} 位` : `${contactColumns} 列`}</strong></div>
             <div className={`event-agent-state ${provider}`}><span>匹配方式</span><strong>{provider === "agent" ? `Agent · ${providerName || "已配置模型"}` : provider === "local" ? "本地规则降级" : matches.length ? "已完成" : "等待开始"}</strong></div>
             <div className="event-source-actions">
               <button type="button" className="text-button" onClick={() => fileInputRef.current?.click()}>重新导入</button>
@@ -602,7 +625,11 @@ export default function EventMatchPage() {
             <section className="event-match-ledger">
               <div className="section-heading-row">
                 <div><p className="eyebrow">建议行动顺序</p><h2>现场引荐顺序</h2></div>
-                <span>{connectedGuestIds.size}/{guests.length} 位已进入关系图 · {mutualCount} 组双向互补</span>
+                <span>
+                  {coverage ? `${coverage.connectedParticipantCount}/${coverage.participantCount} 位已进入关系图` : `${connectedGuestIds.size}/${guests.length} 位已进入关系图`}
+                  {coverage?.unconnectedGuestIds.length ? ` · ${coverage.unconnectedGuestIds.length} 位待补充` : ""}
+                  {` · ${mutualCount} 组双向互补`}
+                </span>
               </div>
               <div className="event-match-list">
                 {matches.map((match, index) => {
