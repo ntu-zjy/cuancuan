@@ -9,6 +9,8 @@ import {
 } from "@/lib/database";
 import { configuredProviderOptions, createConfiguredChatModel } from "@/lib/model-runtime";
 import { CHANNELS, DEFAULT_CHANNEL, isChannel } from "@/lib/channels";
+import { isSameOriginRequest } from "@/lib/http-security";
+import { requireUserSession } from "@/lib/user-auth";
 import type { AgentQuestionForm, Channel, ChatMessage, Intent } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -539,12 +541,19 @@ async function requestIntentAgent(configuration: ActiveModelConfiguration, messa
 }
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) return NextResponse.json({ error: "请求来源无效。" }, { status: 403 });
   const startedAt = Date.now();
+  let session: Awaited<ReturnType<typeof requireUserSession>>;
+  try {
+    session = await requireUserSession();
+  } catch {
+    return NextResponse.json({ error: "登录状态已失效，请重新进入攒攒。" }, { status: 401 });
+  }
   const body = await request.json().catch(() => ({}));
-  const requestBody = body as { messages?: unknown; userEmail?: unknown; channel?: unknown };
+  const requestBody = body as { messages?: unknown; channel?: unknown };
   const messages = cleanMessages(requestBody.messages);
   const channel = typeof requestBody.channel === "string" && isChannel(requestBody.channel) ? requestBody.channel : DEFAULT_CHANNEL;
-  const userEmail = typeof requestBody.userEmail === "string" ? requestBody.userEmail.slice(0, 180) : "";
+  const userEmail = session.email;
   if (!messages.some((message) => message.role === "user")) {
     return NextResponse.json({ error: "请先说说你现在想认识什么人。" }, { status: 400 });
   }

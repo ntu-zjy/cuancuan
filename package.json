@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint .",
     "simulate:100": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/simulate-100-users.mjs",
-    "simulate:100:http": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/simulate-100-users-http.mjs"
+    "simulate:100:http": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/simulate-100-users-http.mjs",
+    "simulate:global-agent:100": "node scripts/simulate-global-agent-100-users.mjs",
+    "test:agent-db": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --experimental-strip-types scripts/test-agent-matching-database.mjs"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.12",

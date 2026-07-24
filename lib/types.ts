@@ -50,6 +50,57 @@ export type Intent = {
   status?: "draft" | "active" | "paused";
 };
 
+export type StoredMatchIntent = {
+  id: string;
+  userId: string;
+  channel: Channel;
+  intent: Intent;
+  matchingEnabled: boolean;
+  status: "active" | "paused";
+  expiresAt: string;
+  confirmedAt: string;
+  updatedAt: string;
+};
+
+export type AnonymousIntentCandidate = {
+  candidateId: string;
+  channel: Channel;
+  profile: {
+    city: string;
+    identity: string;
+    skills: string;
+    offer: string;
+    bio: string;
+  };
+  intent: Intent;
+  expiresAt: string;
+  updatedAt: string;
+};
+
+export type AgentRecruitingRoomDraft = {
+  type: string;
+  title: string;
+  summary: string;
+  description: string;
+  tags: string[];
+  minMembers: number;
+  maxMembers: number;
+  startsAt: string;
+  endsAt: string;
+  registrationDeadline: string;
+  cancellationDeadline: string;
+  city: string;
+  venue: string;
+  address: string;
+  price: Opportunity["price"];
+  registrationMode: Opportunity["registrationMode"];
+  agenda: string[];
+  notices: string[];
+  reason: string;
+  observation: string;
+  trialPlan?: Opportunity["trialPlan"];
+};
+
 export type QuestionOption = {
   value: string;
   label: string;

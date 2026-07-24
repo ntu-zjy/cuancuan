@@ -5,12 +5,16 @@ import { DatabaseSync } from "node:sqlite";
 import { opportunities as seedOpportunities } from "./data";
 import type { ModelProviderKind } from "./model-presets";
 import type {
+  AgentRecruitingRoomDraft,
+  AnonymousIntentCandidate,
   Channel,
+  Intent,
   Opportunity,
   OpportunityRegistrationStatus,
   RoomFeedback,
   RoomLifecycleStatus,
   RoomWorkspace,
+  StoredMatchIntent,
   TrustSummary,
 } from "./types";
 import { decryptSecret, encryptSecret, maskSecret } from "./secret-crypto";
@@ -20,7 +24,7 @@ const globalDatabase = globalThis as typeof globalThis & {
   __cuancuanSchemaVersion?: number;
 };
 
-const DATABASE_SCHEMA_VERSION = 2;
+const DATABASE_SCHEMA_VERSION = 3;
 
 function now() {
   return new Date().toISOString();
@@ -224,6 +228,28 @@ function initializeDatabase(database: DatabaseSync) {
       PRIMARY KEY(user_id, channel)
     );
 
+    CREATE TABLE IF NOT EXISTS match_intents (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+      channel TEXT NOT NULL,
+      intent_json TEXT NOT NULL,
+      matching_enabled INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'paused' CHECK (status IN ('active', 'paused')),
+      expires_at TEXT NOT NULL,
+      confirmed_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(user_id, channel)
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_room_creations (
+      user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+      idempotency_key TEXT NOT NULL,
+      intent_id TEXT REFERENCES match_intents(id) ON DELETE SET NULL,
+      event_id TEXT NOT NULL UNIQUE REFERENCES events(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(user_id, idempotency_key)
+    );
+
     CREATE TABLE IF NOT EXISTS user_restrictions (
       user_id TEXT PRIMARY KEY REFERENCES app_users(id) ON DELETE CASCADE,
       status TEXT NOT NULL DEFAULT 'none' CHECK (status IN ('none', 'limited', 'temporary', 'permanent')),
@@ -239,6 +265,10 @@ function initializeDatabase(database: DatabaseSync) {
       ON room_messages(event_id, created_at ASC);
     CREATE INDEX IF NOT EXISTS trust_reports_by_status
       ON trust_reports(status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS match_intents_by_channel
+      ON match_intents(channel, matching_enabled, status, expires_at, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS agent_room_creations_by_intent
+      ON agent_room_creations(intent_id, created_at DESC);
   `);
 
   ensureColumn(database, "app_users", "avatar", "TEXT NOT NULL DEFAULT '/avatars/avatar-01.png'");
@@ -840,6 +870,269 @@ export function listRelationshipSpaces(userId: string) {
   }));
 }
 
+type MatchIntentRow = {
+  id: string;
+  user_id: string;
+  channel: Channel;
+  intent_json: string;
+  matching_enabled: number;
+  status: "active" | "paused";
+  expires_at: string;
+  confirmed_at: string;
+  updated_at: string;
+};
+
+function safeIntentText(value: unknown, maxLength = 1200) {
+  return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
+}
+
+function normalizedAgentIntent(intent: Intent, channel: Channel, status: "active" | "paused"): Intent {
+  return {
+    title: safeIntentText(intent.title, 120),
+    summary: safeIntentText(intent.summary, 1000),
+    scene: channel === "love" ? "love" : intent.scene === "love" ? "love" : "startup",
+    channel,
+    target: safeIntentText(intent.target, 800),
+    context: safeIntentText(intent.context, 800) || undefined,
+    offer: safeIntentText(intent.offer, 800),
+    commitment: safeIntentText(intent.commitment, 500) || undefined,
+    constraints: safeIntentText(intent.constraints, 800) || undefined,
+    validity: safeIntentText(intent.validity, 120),
+    status,
+  };
+}
+
+function intentExpiry(intent: Intent, explicitExpiry?: string) {
+  if (explicitExpiry) {
+    const parsed = Date.parse(explicitExpiry);
+    if (!Number.isFinite(parsed) || parsed <= Date.now()) throw new Error("意图有效期必须是未来的有效时间。");
+    return new Date(parsed).toISOString();
+  }
+  const validity = intent.validity.trim();
+  const days = /(?:本周|一周|7\s*天)/i.test(validity)
+    ? 7
+    : /(?:两周|2\s*周|14\s*天)/i.test(validity)
+      ? 14
+      : /(?:三个月|3\s*个月|90\s*天)/i.test(validity)
+        ? 90
+        : /(?:一个月|1\s*个月|30\s*天)/i.test(validity)
+          ? 30
+          : 30;
+  return new Date(Date.now() + days * 86_400_000).toISOString();
+}
+
+function matchIntentFromRow(row: MatchIntentRow): StoredMatchIntent {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    channel: row.channel,
+    intent: JSON.parse(row.intent_json) as Intent,
+    matchingEnabled: booleanValue(row.matching_enabled),
+    status: row.status,
+    expiresAt: row.expires_at,
+    confirmedAt: row.confirmed_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * Called only after a signed-in user confirms the intent and opts into matching.
+ * Re-confirming identical intent keeps its identity (and therefore room idempotency);
+ * changing the confirmed intent starts a new intent identity.
+ */
+export function saveAgentMatchIntent(input: {
+  userId: string;
+  channel: Channel;
+  intent: Intent;
+  matchingEnabled?: boolean;
+  expiresAt?: string;
+}) {
+  const database = getDatabase();
+  if (!getUserProfile(input.userId)) throw new Error("用户不存在。");
+  ensureRelationshipSpace(input.userId, input.channel);
+  const matchingEnabled = input.matchingEnabled !== false;
+  const status = matchingEnabled ? "active" : "paused";
+  const intent = normalizedAgentIntent(input.intent, input.channel, status);
+  if (!intent.title || !intent.summary || !intent.target) throw new Error("确认意图缺少必要信息。");
+  const serialized = JSON.stringify(intent);
+  const expiresAt = intentExpiry(intent, input.expiresAt);
+  const timestamp = now();
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const existing = database.prepare(`
+      SELECT * FROM match_intents WHERE user_id = ? AND channel = ?
+    `).get(input.userId, input.channel) as unknown as MatchIntentRow | undefined;
+    if (existing && existing.intent_json === serialized) {
+      database.prepare(`
+        UPDATE match_intents SET matching_enabled = ?, status = ?, expires_at = ?, updated_at = ?
+        WHERE id = ?
+      `).run(matchingEnabled ? 1 : 0, status, expiresAt, timestamp, existing.id);
+    } else {
+      if (existing) database.prepare("DELETE FROM match_intents WHERE id = ?").run(existing.id);
+      database.prepare(`
+        INSERT INTO match_intents (
+          id, user_id, channel, intent_json, matching_enabled, status,
+          expires_at, confirmed_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        randomUUID(),
+        input.userId,
+        input.channel,
+        serialized,
+        matchingEnabled ? 1 : 0,
+        status,
+        expiresAt,
+        timestamp,
+        timestamp,
+      );
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+  return getAgentMatchIntent(input.userId, input.channel)!;
+}
+
+export function getAgentMatchIntent(userId: string, channel: Channel) {
+  const row = getDatabase().prepare(`
+    SELECT * FROM match_intents WHERE user_id = ? AND channel = ?
+  `).get(userId, channel) as unknown as MatchIntentRow | undefined;
+  return row ? matchIntentFromRow(row) : undefined;
+}
+
+export function setAgentMatchIntentEnabled(input: {
+  userId: string;
+  channel: Channel;
+  enabled: boolean;
+  expiresAt?: string;
+}) {
+  const current = getAgentMatchIntent(input.userId, input.channel);
+  if (!current) throw new Error("还没有已确认的匹配意图。");
+  const expiresAt = input.enabled
+    ? intentExpiry(current.intent, input.expiresAt || (Date.parse(current.expiresAt) > Date.now() ? current.expiresAt : undefined))
+    : current.expiresAt;
+  const status = input.enabled ? "active" : "paused";
+  const intent = normalizedAgentIntent(current.intent, input.channel, status);
+  getDatabase().prepare(`
+    UPDATE match_intents
+    SET intent_json = ?, matching_enabled = ?, status = ?, expires_at = ?, updated_at = ?
+    WHERE id = ?
+  `).run(JSON.stringify(intent), input.enabled ? 1 : 0, status, expiresAt, now(), current.id);
+  return getAgentMatchIntent(input.userId, input.channel)!;
+}
+
+export function deleteAgentMatchIntent(userId: string, channel: Channel) {
+  getDatabase().prepare("DELETE FROM match_intents WHERE user_id = ? AND channel = ?").run(userId, channel);
+}
+
+function redactCandidateContact(value: string) {
+  return value
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[联系方式已隐藏]")
+    .replace(/(?<!\d)1[3-9]\d{9}(?!\d)/g, "[联系方式已隐藏]")
+    .replace(/(?:微信|wechat|weixin|vx|v信)\s*(?:号|id)?\s*[:：]?\s*[a-zA-Z][-_a-zA-Z0-9]{5,19}/gi, "[联系方式已隐藏]");
+}
+
+/**
+ * Returns a same-channel, opt-in, unexpired candidate pool for the Agent to reason over.
+ * It deliberately does not score or rank candidates and never selects email, WeChat,
+ * nickname or avatar from app_users.
+ */
+export function listAgentIntentCandidates(input: {
+  userId: string;
+  channel: Channel;
+  limit?: number;
+}): AnonymousIntentCandidate[] {
+  const limit = Math.max(1, Math.min(100, Math.floor(input.limit || 40)));
+  const timestamp = now();
+  const requesterIntent = getAgentMatchIntent(input.userId, input.channel);
+  if (!requesterIntent
+    || !requesterIntent.matchingEnabled
+    || requesterIntent.status !== "active"
+    || Date.parse(requesterIntent.expiresAt) <= Date.now()) {
+    throw new Error("请先确认当前关系空间的匹配意图。");
+  }
+  const rows = getDatabase().prepare(`
+    SELECT
+      i.user_id AS candidate_id,
+      i.channel,
+      i.intent_json,
+      i.expires_at,
+      i.updated_at,
+      u.city,
+      u.identity,
+      u.skills,
+      u.offer,
+      u.bio,
+      s.profile_json
+    FROM match_intents i
+    JOIN app_users u ON u.id = i.user_id
+    JOIN relationship_spaces s ON s.user_id = i.user_id AND s.channel = i.channel
+    LEFT JOIN user_restrictions r ON r.user_id = i.user_id
+    WHERE i.user_id != ?
+      AND i.channel = ?
+      AND i.matching_enabled = 1
+      AND i.status = 'active'
+      AND i.expires_at > ?
+      AND s.discoverable = 1
+      AND (
+        r.user_id IS NULL
+        OR r.status = 'none'
+        OR (r.status = 'temporary' AND r.restricted_until IS NOT NULL AND r.restricted_until <= ?)
+      )
+    ORDER BY i.updated_at DESC
+    LIMIT ?
+  `).all(input.userId, input.channel, timestamp, timestamp, limit) as unknown as Array<{
+    candidate_id: string;
+    channel: Channel;
+    intent_json: string;
+    expires_at: string;
+    updated_at: string;
+    city: string;
+    identity: string;
+    skills: string;
+    offer: string;
+    bio: string;
+    profile_json: string;
+  }>;
+
+  return rows.flatMap((row) => {
+    let intent: Intent;
+    let space: Partial<RelationshipSpaceProfile> = {};
+    try {
+      intent = JSON.parse(row.intent_json) as Intent;
+      space = JSON.parse(row.profile_json) as Partial<RelationshipSpaceProfile>;
+    } catch {
+      return [];
+    }
+    const safe = (value: unknown) => redactCandidateContact(typeof value === "string" ? value : "");
+    return [{
+      candidateId: row.candidate_id,
+      channel: row.channel,
+      profile: {
+        city: safe(row.city),
+        identity: safe(space.identity ?? row.identity),
+        skills: safe(space.skills ?? row.skills),
+        offer: safe(space.offer ?? row.offer),
+        bio: safe(space.bio ?? row.bio),
+      },
+      intent: {
+        ...intent,
+        title: safe(intent.title),
+        summary: safe(intent.summary),
+        target: safe(intent.target),
+        context: intent.context ? safe(intent.context) : undefined,
+        offer: safe(intent.offer),
+        commitment: intent.commitment ? safe(intent.commitment) : undefined,
+        constraints: intent.constraints ? safe(intent.constraints) : undefined,
+      },
+      expiresAt: row.expires_at,
+      updatedAt: row.updated_at,
+    }];
+  });
+}
+
 export function findUserSession(tokenHash: string) {
   return getDatabase().prepare(`
     SELECT u.id, u.email, u.nickname, s.expires_at,
@@ -1090,6 +1383,198 @@ export function createEventForUser(input: { userId: string; event: Opportunity }
       .run(timestamp, input.userId);
     database.exec("COMMIT");
     return event;
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function proposalText(value: unknown, maxLength: number) {
+  const text = typeof value === "string" ? value.trim().slice(0, maxLength) : "";
+  return redactCandidateContact(text);
+}
+
+function proposalList(value: unknown, maxItems: number, maxItemLength: number) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => proposalText(item, maxItemLength))
+    .filter(Boolean)
+    .slice(0, maxItems);
+}
+
+function proposalDate(value: string, label: string) {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) throw new Error(`${label}不是有效时间。`);
+  return new Date(parsed).toISOString();
+}
+
+/**
+ * Agent tool boundary for starting recruitment after search found no suitable room.
+ * One confirmed active intent can create at most one room; retries return the same room.
+ */
+export function createAgentRoomForIntent(input: {
+  userId: string;
+  channel: Channel;
+  intent: Intent;
+  proposal: AgentRecruitingRoomDraft;
+}): { event: Opportunity; created: boolean } {
+  const database = getDatabase();
+  const owner = getUserProfileForSpace(input.userId, input.channel);
+  if (!owner) throw new Error("用户不存在。");
+
+  const startsAt = proposalDate(input.proposal.startsAt, "开始时间");
+  const endsAt = proposalDate(input.proposal.endsAt, "结束时间");
+  const registrationDeadline = proposalDate(input.proposal.registrationDeadline, "报名截止时间");
+  const cancellationDeadline = proposalDate(input.proposal.cancellationDeadline, "取消截止时间");
+  if (Date.parse(startsAt) <= Date.now()) throw new Error("开始时间必须在未来。");
+  if (Date.parse(registrationDeadline) <= Date.now()) throw new Error("报名截止时间必须在未来。");
+  if (Date.parse(cancellationDeadline) <= Date.now()) throw new Error("取消截止时间必须在未来。");
+  if (Date.parse(endsAt) <= Date.parse(startsAt)) throw new Error("结束时间必须晚于开始时间。");
+  if (Date.parse(registrationDeadline) > Date.parse(startsAt)) throw new Error("报名截止时间不能晚于开始时间。");
+  if (Date.parse(cancellationDeadline) > Date.parse(startsAt)) throw new Error("取消截止时间不能晚于开始时间。");
+
+  const minMembers = Math.floor(Number(input.proposal.minMembers));
+  const maxMembers = Math.floor(Number(input.proposal.maxMembers));
+  if (!Number.isFinite(minMembers) || !Number.isFinite(maxMembers)
+    || minMembers < 2 || maxMembers < minMembers || maxMembers > 100) {
+    throw new Error("成局人数需要在 2–100 人之间，且上限不能小于下限。");
+  }
+
+  const title = proposalText(input.proposal.title, 120);
+  const summary = proposalText(input.proposal.summary, 500);
+  if (!title || !summary) throw new Error("Agent 的建局方案缺少标题或摘要。");
+
+  const restriction = database.prepare(`
+    SELECT status, restricted_until FROM user_restrictions WHERE user_id = ?
+  `).get(input.userId) as { status: "none" | "limited" | "temporary" | "permanent"; restricted_until: string | null } | undefined;
+  const temporaryActive = restriction?.status === "temporary"
+    && (!restriction.restricted_until || Date.parse(restriction.restricted_until) > Date.now());
+  if (restriction && (restriction.status === "limited" || restriction.status === "permanent" || temporaryActive)) {
+    throw new Error("当前账号暂时不能发起新的局。");
+  }
+
+  const priceType = input.proposal.price?.type;
+  if (priceType !== "free" && priceType !== "aa" && priceType !== "fixed") {
+    throw new Error("费用类型无效。");
+  }
+  const price: Opportunity["price"] = {
+    type: priceType,
+    amount: priceType === "fixed"
+      ? Math.max(0, Number(input.proposal.price.amount || 0))
+      : undefined,
+    note: proposalText(input.proposal.price.note, 120) || undefined,
+  };
+  const timestamp = now();
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const activeRow = database.prepare(`
+      SELECT * FROM match_intents
+      WHERE user_id = ? AND channel = ? AND matching_enabled = 1
+        AND status = 'active' AND expires_at > ?
+    `).get(input.userId, input.channel, timestamp) as unknown as MatchIntentRow | undefined;
+    if (!activeRow) throw new Error("没有可用于建局的已确认有效意图。");
+    const active = matchIntentFromRow(activeRow);
+    const suppliedIntent = normalizedAgentIntent(input.intent, input.channel, "active");
+    if (JSON.stringify(suppliedIntent) !== JSON.stringify(active.intent)) {
+      throw new Error("用户意图已经更新，请基于最新确认意图重新搜索。");
+    }
+
+    const idempotencyKey = `active-intent:${active.id}`;
+    const existing = database.prepare(`
+      SELECT e.id, e.payload_json, e.published
+      FROM agent_room_creations c
+      JOIN events e ON e.id = c.event_id
+      WHERE c.user_id = ? AND c.idempotency_key = ?
+    `).get(input.userId, idempotencyKey) as EventRow | undefined;
+    if (existing) {
+      database.exec("COMMIT");
+      return { event: parseEvent(existing), created: false };
+    }
+
+    const id = `room-${randomUUID()}`;
+    const roles = proposalList(input.proposal.trialPlan?.roles, 12, 120);
+    const event: Opportunity = {
+      id,
+      scene: input.channel === "love" || input.channel === "play" || input.channel === "travel"
+        ? "love"
+        : "startup",
+      channel: input.channel,
+      type: proposalText(input.proposal.type, 80) || "Agent 发起局",
+      title,
+      summary,
+      description: proposalText(input.proposal.description, 1800) || summary,
+      tags: proposalList(input.proposal.tags, 10, 40),
+      members: 0,
+      minMembers,
+      maxMembers,
+      startsAt,
+      endsAt,
+      registrationDeadline,
+      cancellationDeadline,
+      city: proposalText(input.proposal.city, 80),
+      venue: proposalText(input.proposal.venue, 160) || "由成员确认",
+      address: proposalText(input.proposal.address, 300),
+      price,
+      organizer: {
+        name: redactCandidateContact(owner.nickname) || "发起人",
+        role: redactCandidateContact(owner.identity) || "发起人",
+        verified: getTrustSummary(input.userId).hostVerified,
+      },
+      registrationMode: input.proposal.registrationMode === "instant" ? "instant" : "approval",
+      visibility: "public",
+      lifecycleStatus: "recruiting",
+      agenda: proposalList(input.proposal.agenda, 12, 240),
+      notices: proposalList(input.proposal.notices, 12, 240),
+      reason: proposalText(input.proposal.reason, 800),
+      observation: proposalText(input.proposal.observation, 800),
+      trialPlan: input.proposal.trialPlan ? {
+        objective: proposalText(input.proposal.trialPlan.objective, 500) || summary,
+        roles,
+        deadline: input.proposal.trialPlan.deadline
+          ? proposalDate(input.proposal.trialPlan.deadline, "行动截止时间")
+          : endsAt,
+        completionCriteria: proposalText(input.proposal.trialPlan.completionCriteria, 500)
+          || "成员共同确认是否完成本次行动目标。",
+        continuationDecision: proposalText(input.proposal.trialPlan.continuationDecision, 500) || undefined,
+      } : undefined,
+      people: [],
+    };
+
+    database.prepare(`
+      INSERT INTO events (id, payload_json, published, created_at, updated_at)
+      VALUES (?, ?, 1, ?, ?)
+    `).run(id, JSON.stringify(event), timestamp, timestamp);
+    database.prepare(`
+      INSERT INTO room_states (
+        event_id, owner_user_id, status, scheduled_at, location, objective,
+        roles_json, deadline, completion_criteria, updated_at
+      ) VALUES (?, ?, 'recruiting', ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      input.userId,
+      event.startsAt,
+      event.venue,
+      event.trialPlan?.objective || event.summary,
+      JSON.stringify(event.trialPlan?.roles || []),
+      event.trialPlan?.deadline || event.endsAt,
+      event.trialPlan?.completionCriteria || "成员共同确认是否完成本次行动目标。",
+      timestamp,
+    );
+    database.prepare(`
+      INSERT INTO event_registrations (id, event_id, user_id, status, note, joined_at, updated_at)
+      VALUES (?, ?, ?, 'confirmed', '发起人', ?, ?)
+    `).run(randomUUID(), id, input.userId, timestamp, timestamp);
+    database.prepare(`
+      INSERT INTO agent_room_creations (user_id, idempotency_key, intent_id, event_id, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(input.userId, idempotencyKey, active.id, id, timestamp);
+    database.prepare("INSERT OR IGNORE INTO trust_profiles (user_id, updated_at) VALUES (?, ?)")
+      .run(input.userId, timestamp);
+    database.prepare("UPDATE trust_profiles SET host_verified = 1, updated_at = ? WHERE user_id = ?")
+      .run(timestamp, input.userId);
+    database.exec("COMMIT");
+    return { event, created: true };
   } catch (error) {
     database.exec("ROLLBACK");
     throw error;

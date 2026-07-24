@@ -497,11 +497,8 @@ export default function CuancuanApp({ initialChannel = DEFAULT_CHANNEL }: { init
 
   const recommended = useMemo(() => {
     if (!activeIntent) return [];
-    if (personalizedRecommendations.length > 0) return personalizedRecommendations;
-    return allOpportunities
-      .filter((item) => resolveOpportunityChannel(item) === (activeIntent.channel || activeChannel))
-      .slice(0, 2);
-  }, [activeChannel, activeIntent, allOpportunities, personalizedRecommendations]);
+    return personalizedRecommendations;
+  }, [activeIntent, personalizedRecommendations]);
 
   const dateChoices = useMemo(() => discoverDateChoices(), []);
   const discoverCities = useMemo(
@@ -607,6 +604,7 @@ export default function CuancuanApp({ initialChannel = DEFAULT_CHANNEL }: { init
     setActiveIntent(targetSession?.activeIntent || null);
     setRecommendationsShown(Boolean(targetSession?.recommendationsShown));
     setPersonalizedRecommendations(targetSession?.personalizedRecommendations || []);
+    setCreatedRoomResult(null);
     setComposer("");
     setNotice("");
     window.setTimeout(() => textareaRef.current?.focus(), 50);
@@ -648,6 +646,7 @@ export default function CuancuanApp({ initialChannel = DEFAULT_CHANNEL }: { init
         setDraftIntent({ ...data.intentDraft, status: "draft" });
         setRecommendationsShown(false);
         setPersonalizedRecommendations([]);
+        setCreatedRoomResult(null);
       }
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -696,19 +695,37 @@ export default function CuancuanApp({ initialChannel = DEFAULT_CHANNEL }: { init
 
   async function loadRecommendations(intent: Intent) {
     setRecommendationsLoading(true);
+    setCreatedRoomResult(null);
     try {
       const response = await fetch("/api/recommendations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ channel: activeChannel, intent }),
       });
-      const data = await response.json() as { recommendations?: Opportunity[]; error?: string };
-      if (!response.ok) throw new Error(data.error || "暂时无法完成匹配。");
+      const data = await response.json() as {
+        recommendations?: Opportunity[];
+        createdRoom?: Opportunity | null;
+        action?: "recommended_existing" | "created_new" | "waiting";
+        message?: string;
+        error?: string;
+      };
+      if (!response.ok) throw new Error(data.error || "Agent 暂时无法完成搜索与组局。");
       setPersonalizedRecommendations(data.recommendations || []);
-      if (!data.recommendations?.length) setNotice("当前关系空间里还没有符合边界的开放局，可以按这份意图发起一个新局。");
+      if (data.createdRoom) {
+        const createdRoom = { ...data.createdRoom, members: Math.max(1, data.createdRoom.members) };
+        setCreatedRoomResult(createdRoom);
+        setHostIds((current) => current.includes(createdRoom.id) ? current : [...current, createdRoom.id]);
+        setJoinedIds((current) => current.includes(createdRoom.id) ? current : [...current, createdRoom.id]);
+        await refreshEvents();
+      }
+      setNotice(data.message || (data.action === "recommended_existing"
+        ? "Agent 找到了值得先看的现有局。"
+        : data.action === "created_new"
+          ? "Agent 没有找到足够合适的现有局，已经按确认意图发起了一个新局。"
+          : "Agent 已保存这份意图，会继续等待合适的人或局。"));
     } catch (error) {
       setPersonalizedRecommendations([]);
-      setNotice(error instanceof Error ? error.message : "暂时无法完成匹配。");
+      setNotice(error instanceof Error ? error.message : "Agent 暂时无法完成搜索与组局。");
     } finally {
       setRecommendationsLoading(false);
     }
@@ -727,7 +744,7 @@ export default function CuancuanApp({ initialChannel = DEFAULT_CHANNEL }: { init
       {
         id: uid(),
         role: "assistant",
-        content: `方向已经确认。我先从当前开放的${channelConfig.opportunityLabel}里找相容选项。推荐只是判断线索，下一步仍由你决定。`,
+        content: `方向已经确认。我会先搜索现有${channelConfig.opportunityLabel}和当前空间里已授权的意图；如果没有足够合适的选项，我会直接发起一个新局。`,
       },
     ]);
     void loadRecommendations(confirmedIntent);
@@ -738,7 +755,7 @@ export default function CuancuanApp({ initialChannel = DEFAULT_CHANNEL }: { init
     window.setTimeout(() => textareaRef.current?.focus(), 50);
   }
 
-  function restartConversation() {
+  async function restartConversation() {
     const hasConversationWork = messages.length > 1 || Boolean(draftIntent) || Boolean(activeIntent) || sending;
     if (!hasConversationWork) {
       setPage("chat");
@@ -746,6 +763,13 @@ export default function CuancuanApp({ initialChannel = DEFAULT_CHANNEL }: { init
       return;
     }
     if (!window.confirm("开始新对话会结束当前对话和意图，但保留你已经加入或创建的局。要继续吗？")) return;
+    let remoteIntentEnded = true;
+    try {
+      const response = await fetch(`/api/recommendations?channel=${encodeURIComponent(activeChannel)}`, { method: "DELETE" });
+      remoteIntentEnded = response.ok;
+    } catch {
+      remoteIntentEnded = false;
+    }
     chatRequestRef.current?.abort();
     chatRequestRef.current = null;
     setMessages(createInitialMessages(activeChannel));
@@ -754,8 +778,11 @@ export default function CuancuanApp({ initialChannel = DEFAULT_CHANNEL }: { init
     setActiveIntent(null);
     setRecommendationsShown(false);
     setPersonalizedRecommendations([]);
+    setCreatedRoomResult(null);
     setSending(false);
-    setNotice("新的对话已经开始。你加入和创建的局都还在。");
+    setNotice(remoteIntentEnded
+      ? "新的对话已经开始。你加入和创建的局都还在。"
+      : "新的对话已经开始，但线上意图暂时未能结束，请稍后再试。");
     setPage("chat");
   }
 
@@ -860,36 +887,6 @@ export default function CuancuanApp({ initialChannel = DEFAULT_CHANNEL }: { init
       setNotice(error instanceof Error ? error.message : "暂时无法取消。 ");
     } finally {
       setRegistrationBusy(false);
-    }
-  }
-
-  async function createOpportunity() {
-    if (!activeIntent || !profile) return;
-    const existing = allOpportunities.find((item) => hostIds.includes(item.id) && resolveOpportunityChannel(item) === activeChannel);
-    if (existing) {
-      setCreatedRoomResult(existing);
-      setNotice(`这个方向已经有「${existing.title}」，可以继续推进。`);
-      return;
-    }
-    setCreatedRoomResult(null);
-    setRoomActionBusy(true);
-    try {
-      const response = await fetch("/api/events", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channel: activeChannel, intent: activeIntent }),
-      });
-      const data = await response.json() as { event?: Opportunity; error?: string };
-      if (!response.ok || !data.event) throw new Error(data.error || "暂时无法发起新局。");
-      setHostIds((current) => current.includes(data.event!.id) ? current : [...current, data.event!.id]);
-      setJoinedIds((current) => current.includes(data.event!.id) ? current : [...current, data.event!.id]);
-      setCreatedRoomResult({ ...data.event, members: 1 });
-      setNotice("新局已经写入真实数据库，你是发起人和第一位成员。");
-      await refreshEvents();
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "暂时无法发起新局。");
-    } finally {
-      setRoomActionBusy(false);
     }
   }
 
@@ -1269,11 +1266,11 @@ export default function CuancuanApp({ initialChannel = DEFAULT_CHANNEL }: { init
                 {activeIntent && recommendationsShown && (
                   <section className="recommendations">
                     <div className="section-heading-row">
-                      <div><p className="eyebrow">AGENT SEARCH / 当前关系空间</p><h2>攒攒看过成员缺口后的建议</h2></div>
+                      <div><p className="eyebrow">AGENT SEARCH / 当前关系空间</p><h2>Agent 搜索与组局结果</h2></div>
                       <span>{channelConfig.shortName}空间 · 不跨空间使用资料</span>
                     </div>
                     {recommendationsLoading ? (
-                      <div className="recommendation-searching"><i /><div><strong>正在搜索真实局和成员缺口</strong><span>核对目标、互补能力、城市时间与硬性边界</span></div></div>
+                      <div className="recommendation-searching"><i /><div><strong>正在搜索现有局和已授权意向</strong><span>Agent 会判断是否加入现有局；没有合适选项时将直接发起新局</span></div></div>
                     ) : recommended.length > 0 ? (
                       <div className="recommendation-list">{recommended.map((opportunity) => (
                         <OpportunityCard
@@ -1285,20 +1282,23 @@ export default function CuancuanApp({ initialChannel = DEFAULT_CHANNEL }: { init
                           onToggleJoin={() => openRegistration(opportunity)}
                         />
                       ))}</div>
-                    ) : <p className="recommendation-empty">没有找到同时满足当前边界的开放局。</p>}
+                    ) : !createdRoomResult ? <p className="recommendation-empty">暂时没有适合直接加入的开放局。</p> : null}
                     {createdRoomResult ? (
                       <div className="create-room-success" role="status" aria-live="polite">
                         <span className="create-room-success-mark" aria-hidden="true">✓</span>
-                        <div><small>新局已经建立</small><strong>{createdRoomResult.title}</strong><p>你是发起人和第一位成员，接下来可以邀请合适的人。</p></div>
+                        <div><small>Agent 已发起新局</small><strong>{createdRoomResult.title}</strong><p>现有选项不够合适。这个局已经进入招募，后续相容用户会在搜索时看到它。</p></div>
                         <div className="create-room-success-actions">
                           <button type="button" onClick={() => openOpportunity(createdRoomResult)}>查看新局</button>
                           <button type="button" onClick={() => setPage("rooms")}>进入我的局 →</button>
                         </div>
                       </div>
                     ) : (
-                      <button type="button" className={`create-room-button ${roomActionBusy ? "is-busy" : ""}`} onClick={createOpportunity} disabled={roomActionBusy} aria-busy={roomActionBusy}>
-                        <span>{roomActionBusy ? "正在建立新局" : "没有合适的？"}</span><strong>{roomActionBusy ? "正在写入并确认发起人身份…" : "按当前意图发起一个新局 →"}</strong>
-                      </button>
+                      !recommendationsLoading && recommended.length === 0 && (
+                        <div className="recommendation-searching" role="status">
+                          <i />
+                          <div><strong>还需要补充关键信息</strong><span>意图已经保存；继续说明时间、城市或边界后，Agent 会再次搜索并决定是否建局。</span></div>
+                        </div>
+                      )
                     )}
                   </section>
                 )}
